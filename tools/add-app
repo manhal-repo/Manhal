@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# add-app FILE [--os android|windows|linux|macos|ios] [--id ID] [--name NAME] [--version V] [--summary TXT] [--icon PNG]
+set -euo pipefail
+SITE_DIR="${SITE_DIR:-$HOME/projects/myrepo-store}"
+usage(){ echo "usage: add-app FILE [--os OS] [--id ID] [--name NAME] [--version V] [--summary TXT] [--icon PNG]"; exit 1; }
+[ $# -ge 1 ] && [ -f "$1" ] || usage
+FILE="$1"; shift
+OS=""; ID=""; NAME=""; VER=""; SUM=""; ICON=""
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || usage
+  case "$1" in --os) OS="$2";; --id) ID="$2";; --name) NAME="$2";; --version) VER="$2";; --summary) SUM="$2";; --icon) ICON="$2";; *) usage;; esac
+  shift 2
+done
+base=$(basename "$FILE"); lower=$(echo "$base" | tr 'A-Z' 'a-z')
+if [ -z "$OS" ]; then
+  case "$lower" in
+    *.apk) OS=android;; *.exe|*.msi) OS=windows;;
+    *.deb|*.rpm|*.appimage|*.tar.gz|*.tar.xz) OS=linux;;
+    *.dmg|*.pkg) OS=macos;; *.ipa) OS=ios;;
+    *) echo "Unknown file type, pass --os"; exit 1;;
+  esac
+fi
+cd "$SITE_DIR"
+REMOTE=$(git remote get-url origin | sed -E 's#.*github.com[:/]##; s#\.git$##')
+if [ "$OS" = android ]; then
+  cp "$FILE" fdroid/repo/
+else
+  SAFE=$(echo "$base" | tr ' ' '_'); cp "$FILE" "/tmp/$SAFE"
+  gh release view files --repo "$REMOTE" >/dev/null 2>&1 || gh release create files --repo "$REMOTE" --title "Files" --notes "Binary downloads"
+  gh release upload files "/tmp/$SAFE" --clobber --repo "$REMOTE"
+  URL="https://github.com/$REMOTE/releases/download/files/$SAFE"
+  SHA=$(sha256sum "/tmp/$SAFE" | cut -d' ' -f1); SIZE=$(stat -c %s "/tmp/$SAFE")
+  ID="${ID:-$(echo "${SAFE%%.*}" | tr 'A-Z' 'a-z')}"
+  ICONREL=""
+  if [ -n "$ICON" ]; then mkdir -p public/catalog/icons; cp "$ICON" "public/catalog/icons/$ID.png"; ICONREL="catalog/icons/$ID.png"; fi
+  python3 - "$ID" "$NAME" "$SUM" "$ICONREL" "$OS" "${VER:-1.0}" "$URL" "$SIZE" "$SHA" <<'PY'
+import json, os, sys
+id_, name, summ, icon, os_, ver, url, size, sha = sys.argv[1:10]
+p = 'public/catalog/apps.json'
+os.makedirs(os.path.dirname(p), exist_ok=True)
+d = json.load(open(p)) if os.path.exists(p) else {"apps": []}
+app = next((a for a in d["apps"] if a["id"] == id_), None)
+if not app:
+    app = {"id": id_, "name": name or id_, "summary": summ, "icon": icon, "downloads": []}
+    d["apps"].append(app)
+else:
+    if name: app["name"] = name
+    if summ: app["summary"] = summ
+    if icon: app["icon"] = icon
+app["downloads"] = [x for x in app["downloads"] if x["os"] != os_]
+app["downloads"].append({"os": os_, "version": ver, "url": url, "size": int(size), "sha256": sha})
+json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+PY
+fi
+git add -A; git commit -qm "Add $base ($OS)"; git push
+gh workflow run deploy.yml --repo "$REMOTE" && echo "Deploy started (a few minutes)." || echo "Run the deploy workflow manually from the Actions tab."
