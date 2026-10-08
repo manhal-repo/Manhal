@@ -17,13 +17,15 @@ jobs:
 
       - name: Set App Name
         run: |
+          set -e
+
           APP_NAME="${GITHUB_REPOSITORY##*/}"
           APK_NAME="${APP_NAME}.apk"
 
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
           echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
 
-          echo "Application name: $APP_NAME"
+          echo "App name: $APP_NAME"
           echo "APK name: $APK_NAME"
 
       - name: Setup JDK 17
@@ -91,7 +93,12 @@ jobs:
           set -e
 
           if [ -f "./gradlew" ]; then
+            echo "Gradle wrapper found."
             chmod +x ./gradlew
+          else
+            echo "Gradle wrapper not found."
+            echo "Standard Gradle 8.9 will be used."
+            gradle --version
           fi
 
       - name: Build Release APK
@@ -102,8 +109,20 @@ jobs:
           set -e
 
           if [ -f "./gradlew" ]; then
+            echo "======================================"
+            echo "Using Gradle Wrapper"
+            echo "======================================"
+
+            chmod +x ./gradlew
+
             ./gradlew assembleRelease --no-daemon
+
           else
+            echo "======================================"
+            echo "gradlew not found"
+            echo "Using standard Gradle 8.9"
+            echo "======================================"
+
             gradle assembleRelease --no-daemon
           fi
 
@@ -113,26 +132,41 @@ jobs:
 
           APK=""
 
-          while IFS= read -r FILE; do
-            APK="$FILE"
-            break
-          done < <(
-            find . \
+          # First try the normal Android app location
+          if [ -d "./app/build/outputs/apk/release" ]; then
+            APK=$(find "./app/build/outputs/apk/release" \
+              -type f \
+              -name "*.apk" \
+              | sort \
+              | head -1)
+          fi
+
+          # If not found, search everywhere
+          if [ -z "$APK" ]; then
+            APK=$(find . \
               -type f \
               -path "*/build/outputs/apk/release/*.apk" \
-              | sort
-          )
+              | sort \
+              | head -1)
+          fi
 
           if [ -z "$APK" ]; then
             echo "ERROR: Release APK not found."
 
+            echo ""
             echo "Available APK files:"
             find . -type f -name "*.apk" -print || true
+
+            echo ""
+            echo "Build directories:"
+            find . -type d -name "build" -print || true
 
             exit 1
           fi
 
-          echo "APK found: $APK"
+          echo "APK found:"
+          echo "$APK"
+
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
       - name: Align and Sign APK
@@ -154,7 +188,8 @@ jobs:
             exit 1
           fi
 
-          echo "Using Android Build Tools: $BT"
+          echo "Using Android Build Tools:"
+          echo "$BT"
 
           "$BT/zipalign" \
             -p \
@@ -175,7 +210,10 @@ jobs:
             --verbose \
             "$APK_NAME"
 
+          echo "======================================"
           echo "APK signed successfully."
+          echo "Output: $APK_NAME"
+          echo "======================================"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -193,16 +231,26 @@ jobs:
           TAG="v${{ github.run_number }}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
+
             echo "Release $TAG already exists."
 
             gh release upload \
               "$TAG" \
               "$APK_NAME" \
               --clobber
+
           else
+
             gh release create \
               "$TAG" \
               "$APK_NAME" \
               --title "$APP_NAME $TAG" \
               --notes "Automated Android release build for $APP_NAME."
+
           fi
+
+          echo "======================================"
+          echo "GitHub Release published."
+          echo "Tag: $TAG"
+          echo "APK: $APK_NAME"
+          echo "======================================"
